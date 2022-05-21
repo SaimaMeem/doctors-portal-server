@@ -5,8 +5,9 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const app = express();
 const port = process.env.PORT || 5000;
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const nodemailer = require('nodemailer');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 app.use(cors());
 app.use(express.json());
 
@@ -19,8 +20,8 @@ const transport = nodemailer.createTransport(({
     rejectUnauthorized: false,
   },
   auth: {
-    user: 'saimatest@outlook.com',
-    pass: 'fortesting1234'
+    user: process.env.EMAIL_USERNAME,
+    pass: process.env.EMAIL_PASSWORD,
   }
 }));
 function sendAppointmentEmail(booking) {
@@ -49,10 +50,36 @@ function sendAppointmentEmail(booking) {
   });
 
 }
+function sendPaymentConfirmationEmail(booking) {
+  console.log("booking", booking);
+  const { patient, patientName, date, slot, treatment } = booking;
+  const mailOptions = {
+    from: '"Doctors Portal" <saimatest@outlook.com>', // Sender address
+    to: patient, // List of recipients
+    subject: `Your payment for appointment of ${treatment} has been received!`, // Subject line
+    html: `<div>
+    Hello <b>${patientName}</b>,
+    <p>Your payment for the appointment of ${treatment} is confirmed. Looking forward to seeing you on ${date} at ${slot}.</p>
+
+
+    <p><b>Our Address</b></p>
+    <p>Dhaka,Bangladesh.</p>
+    </div>`
+  };
+
+  transport.sendMail(mailOptions, function (err, info) {
+    if (err) {
+      console.log(err)
+    } else {
+      console.log(info);
+    }
+  });
+
+}
 function verifyJWT(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) {
-    return res.status(401).send({ message: 'UnAuthorized access' });
+    return res.status(401).send({ message: 'Unauthorized access' });
   }
   const token = authHeader.split(' ')[1];
   jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, function (err, decoded) {
@@ -73,6 +100,7 @@ async function run() {
     const bookingCollection = client.db('doctors_portal').collection('bookings');
     const userCollection = client.db('doctors_portal').collection('users');
     const doctorCollection = client.db('doctors_portal').collection('doctors');
+    const paymentCollection = client.db('doctors_portal').collection('payments');
 
 
     const verifyAdmin = async (req, res, next) => {
@@ -197,6 +225,44 @@ async function run() {
       const filter = { email: email };
       const result = await doctorCollection.deleteOne(filter);
       res.send(result);
+    });
+
+    //GET
+    app.get('/booking/:id', verifyJWT, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: ObjectId(id) };
+      const result = await bookingCollection.findOne(query);
+      res.send(result);
+    })
+    //POST
+    app.post('/create-payment-intent', verifyJWT, async (req, res) => {
+      const service = req.body;
+      const price = service.price;
+      const amount = price * 100;
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+      });
+      res.send({
+        clientSecret: paymentIntent.client_secret
+      });
+    })
+    // PATCH
+    app.patch('/booking/:id', verifyJWT, async (req, res) => {
+      const id = req.params.id;
+      const payment = req.body;
+      const filter = { _id: ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          paid: true,
+          transactionId: payment.transactionId,
+        }
+      }
+      const result = await paymentCollection.insertOne(payment);
+      const updatedBooking = await bookingCollection.updateOne(filter, updatedDoc);
+      res.send(updatedBooking);
+
     });
   }
   finally {
